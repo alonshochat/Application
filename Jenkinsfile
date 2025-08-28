@@ -5,7 +5,7 @@ pipeline {
   environment {
     APP_NAME   = 'calculator-app'
     AWS_REGION = 'us-east-1'
-    PROD_HOST  = 'ec2-XX-XX-XX-XX.compute-1.amazonaws.com'
+    PROD_HOST  = credentials('prod-ec2-host')
     SSH_KEY_ID = 'prod-ec2-ssh-key'
   }
 
