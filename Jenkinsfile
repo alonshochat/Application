@@ -3,7 +3,7 @@ pipeline {
   options { ansiColor('xterm'); timestamps() }
 
   environment {
-    APP_NAME   = 'calculator-app'
+    APP_NAME   = 'calculator-app-alon'
     AWS_REGION = 'us-east-1'
     PROD_HOST  = credentials('prod-ec2-host')
     SSH_KEY_ID = 'prod-ec2-ssh-key'
