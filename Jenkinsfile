@@ -3,10 +3,10 @@ pipeline {
   options { ansiColor('xterm'); timestamps() }
 
   environment {
-    APP_NAME   = 'calculator-app-alon'
-    AWS_REGION = 'us-east-1'
-    PROD_HOST  = credentials('prod-ec2-host')
-    SSH_KEY_ID = 'prod-ec2-ssh-key'
+    APP_NAME   = 'calculator-app-alonshochat'   // ECR repo name
+    AWS_REGION = 'us-east-1'                    // your region
+    PROD_HOST  = credentials('prod-ec2-host')   // Jenkins Secret Text (Prod DNS/IP)
+    SSH_KEY_ID = 'prod-ec2-ssh-key'             // Jenkins SSH key (ec2-user)
   }
 
   stages {
@@ -20,36 +20,28 @@ pipeline {
       steps {
         sh '''
           set -eux
-
-          # Discover AWS/ECR
           AWS_ACCOUNT_ID=$(docker run --rm --network host amazon/aws-cli \
             sts get-caller-identity --query Account --output text --region "$AWS_REGION")
           ECR="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
           IMAGE="$ECR/$APP_NAME:pr-${CHANGE_ID}-${BUILD_NUMBER}"
 
-          # Ensure repo exists (idempotent)
+          # ensure repo exists (idempotent)
           docker run --rm --network host amazon/aws-cli ecr describe-repositories \
             --repository-names "$APP_NAME" --region "$AWS_REGION" || \
           docker run --rm --network host amazon/aws-cli ecr create-repository \
             --repository-name "$APP_NAME" --region "$AWS_REGION"
 
-          # --- Auto-detect Dockerfile path anywhere in the repo ---
-          DOCKERFILE=$(find "$WORKSPACE" -maxdepth 5 -type f \\( -name Dockerfile -o -name dockerfile \\) | head -n1)
-          if [ -z "$DOCKERFILE" ]; then
-            echo "ERROR: Dockerfile not found in repository."; ls -la; exit 2
-          fi
-          # Make paths relative to workspace for docker build context
-          DOCKERFILE_REL=${DOCKERFILE#"$WORKSPACE"/}
-
-          # ECR login
+          # ECR login password
           PASS=$(docker run --rm --network host amazon/aws-cli \
             ecr get-login-password --region "$AWS_REGION")
 
-          # Build with context = workspace (.) and the detected Dockerfile
+          # Build with explicit Dockerfile and context mounted at /w
           docker run --rm --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$WORKSPACE":/w -w /w \
-            docker:26-cli sh -lc "echo \\"$PASS\\" | docker login --username AWS --password-stdin $ECR && docker build -f '$DOCKERFILE_REL' -t '$IMAGE' ."
+            docker:26-cli sh -lc "\
+              echo \\"$PASS\\" | docker login --username AWS --password-stdin $ECR && \
+              docker build -f /w/Dockerfile -t '$IMAGE' /w"
 
           echo "$IMAGE" > image_ref.txt
         '''
@@ -100,7 +92,6 @@ pipeline {
       steps {
         sh '''
           set -eux
-
           AWS_ACCOUNT_ID=$(docker run --rm --network host amazon/aws-cli \
             sts get-caller-identity --query Account --output text --region "$AWS_REGION")
           ECR="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
@@ -115,13 +106,6 @@ pipeline {
           docker run --rm --network host amazon/aws-cli ecr create-repository \
             --repository-name "$APP_NAME" --region "$AWS_REGION"
 
-          # --- Auto-detect Dockerfile path again (same logic) ---
-          DOCKERFILE=$(find "$WORKSPACE" -maxdepth 5 -type f \\( -name Dockerfile -o -name dockerfile \\) | head -n1)
-          if [ -z "$DOCKERFILE" ]; then
-            echo "ERROR: Dockerfile not found in repository."; ls -la; exit 2
-          fi
-          DOCKERFILE_REL=${DOCKERFILE#"$WORKSPACE"/}
-
           PASS=$(docker run --rm --network host amazon/aws-cli \
             ecr get-login-password --region "$AWS_REGION")
 
@@ -130,7 +114,7 @@ pipeline {
             -v "$WORKSPACE":/w -w /w \
             docker:26-cli sh -lc "\
               echo \\"$PASS\\" | docker login --username AWS --password-stdin $ECR && \
-              docker build -f '$DOCKERFILE_REL' -t '$IMAGE_CAND' . && \
+              docker build -f /w/Dockerfile -t '$IMAGE_CAND' /w && \
               docker tag '$IMAGE_CAND' '$IMAGE_LATEST'"
 
           printf "%s\n%s\n" "$IMAGE_CAND" "$IMAGE_LATEST" > images.txt
