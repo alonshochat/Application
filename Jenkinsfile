@@ -4,9 +4,9 @@ pipeline {
 
   environment {
     APP_NAME   = 'calculator-app'
-    AWS_REGION = 'us-east-1'                 // <-- set your region
-    PROD_HOST  = 'ec2-XX-XX-XX-XX.compute-1.amazonaws.com' // <-- Prod EC2 public DNS/IP
-    SSH_KEY_ID = 'prod-ec2-ssh-key'          // Jenkins credential ID for prod SSH key
+    AWS_REGION = 'us-east-1'
+    PROD_HOST  = 'ec2-XX-XX-XX-XX.compute-1.amazonaws.com'
+    SSH_KEY_ID = 'prod-ec2-ssh-key'
   }
 
   stages {
