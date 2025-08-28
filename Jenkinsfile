@@ -1,9 +1,9 @@
 pipeline {
-  agent none
+  agent any
   options { ansiColor('xterm'); timestamps() }
 
   environment {
-    APP_NAME   = 'calculator-app-alon'
+    APP_NAME   = 'calculator-app-alonshochat'
     AWS_REGION = 'us-east-1'
     PROD_HOST  = credentials('prod-ec2-host')
     SSH_KEY_ID = 'prod-ec2-ssh-key'
@@ -11,34 +11,31 @@ pipeline {
 
   stages {
     stage('Checkout') {
-      agent { any }
       steps { checkout scm }
     }
 
-    /* ===== PR (CI) ===== */
+    // ===== PR (CI) =====
     stage('PR: Build Image') {
       when { changeRequest() }
-      agent { any }
       steps {
         sh '''
           set -eux
-          # Discover account and ECR
           AWS_ACCOUNT_ID=$(docker run --rm --network host amazon/aws-cli \
             sts get-caller-identity --query Account --output text --region "$AWS_REGION")
           ECR="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
           IMAGE="$ECR/$APP_NAME:pr-${CHANGE_ID}-${BUILD_NUMBER}"
 
-          # Ensure repo exists (idempotent)
           docker run --rm --network host amazon/aws-cli ecr describe-repositories \
             --repository-names "$APP_NAME" --region "$AWS_REGION" || \
           docker run --rm --network host amazon/aws-cli ecr create-repository \
             --repository-name "$APP_NAME" --region "$AWS_REGION"
 
-          # Build using the host docker daemon via docker:26-cli
+          PASS=$(docker run --rm --network host amazon/aws-cli \
+            ecr get-login-password --region "$AWS_REGION")
           docker run --rm --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD":/workspace -w /workspace \
-            docker:26-cli sh -lc "docker build -t '$IMAGE' ."
+            -v "$PWD":/w -w /w \
+            docker:26-cli sh -lc "echo \"$PASS\" | docker login --username AWS --password-stdin $ECR && docker build -t '$IMAGE' ."
 
           echo "$IMAGE" > image_ref.txt
         '''
@@ -48,11 +45,9 @@ pipeline {
 
     stage('PR: Test') {
       when { changeRequest() }
-      agent { any }
       steps {
         sh '''
           set -eux
-          # Run tests inside a Python container (no plugins needed)
           docker run --rm --network host \
             -v "$PWD":/app -w /app \
             python:3.12-slim sh -lc \
@@ -64,7 +59,6 @@ pipeline {
 
     stage('PR: Push to ECR') {
       when { changeRequest() }
-      agent { any }
       steps {
         sh '''
           set -eux
@@ -73,7 +67,6 @@ pipeline {
           ECR="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
           IMAGE=$(cat image_ref.txt)
 
-          # ECR login (get password via aws-cli container, use docker CLI container to push)
           PASS=$(docker run --rm --network host amazon/aws-cli \
             ecr get-login-password --region "$AWS_REGION")
           docker run --rm --network host \
@@ -83,10 +76,9 @@ pipeline {
       }
     }
 
-    /* ===== Merge (CD) ===== */
+    // ===== Merge (CD) =====
     stage('CD: Build Image') {
       when { anyOf { branch 'master'; branch 'main' } }
-      agent { any }
       steps {
         sh '''
           set -eux
@@ -99,17 +91,19 @@ pipeline {
           IMAGE_CAND="$ECR/$APP_NAME:commit-$SHORT_SHA"
           IMAGE_LATEST="$ECR/$APP_NAME:latest"
 
-          # Ensure repo exists
           docker run --rm --network host amazon/aws-cli ecr describe-repositories \
             --repository-names "$APP_NAME" --region "$AWS_REGION" || \
           docker run --rm --network host amazon/aws-cli ecr create-repository \
             --repository-name "$APP_NAME" --region "$AWS_REGION"
 
-          # Build & tag via docker CLI container
+          PASS=$(docker run --rm --network host amazon/aws-cli \
+            ecr get-login-password --region "$AWS_REGION")
           docker run --rm --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD":/workspace -w /workspace \
-            docker:26-cli sh -lc "docker build -t '$IMAGE_CAND' . && docker tag '$IMAGE_CAND' '$IMAGE_LATEST'"
+            -v "$PWD":/w -w /w \
+            docker:26-cli sh -lc "\
+              echo \"$PASS\" | docker login --username AWS --password-stdin $ECR && \
+              docker build -t '$IMAGE_CAND' . && docker tag '$IMAGE_CAND' '$IMAGE_LATEST'"
 
           printf "%s\n%s\n" "$IMAGE_CAND" "$IMAGE_LATEST" > images.txt
         '''
@@ -119,7 +113,6 @@ pipeline {
 
     stage('CD: Test') {
       when { anyOf { branch 'master'; branch 'main' } }
-      agent { any }
       steps {
         sh '''
           set -eux
@@ -134,7 +127,6 @@ pipeline {
 
     stage('CD: Push to ECR') {
       when { anyOf { branch 'master'; branch 'main' } }
-      agent { any }
       steps {
         sh '''
           set -eux
@@ -156,24 +148,19 @@ pipeline {
 
     stage('CD: Deploy to Prod EC2') {
       when { anyOf { branch 'master'; branch 'main' } }
-      agent { any }
       steps {
         sshagent (credentials: ["${SSH_KEY_ID}"]) {
           sh '''
             set -eux
-            # Ensure ssh client is present on this node
-            if ! command -v ssh >/dev/null 2>&1; then
+            command -v ssh >/dev/null || {
               if command -v apt-get >/dev/null; then apt-get update && apt-get install -y openssh-client;
               elif command -v yum >/dev/null; then yum install -y openssh-clients;
               elif command -v dnf >/dev/null; then dnf install -y openssh-clients || dnf install -y openssh;
-              elif command -v apk >/dev/null; then apk add --no-cache openssh-client;
-              fi
-            fi
+              elif command -v apk >/dev/null; then apk add --no-cache openssh-client; fi
+            }
 
-            # Figure out candidate image (first line of images.txt)
             IMAGE=$(head -n1 images.txt)
 
-            # Remote deploy (awscli + docker must be installed on Prod EC2; role provides creds)
             ssh -o StrictHostKeyChecking=no ec2-user@"$PROD_HOST" "\
               aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $(echo $IMAGE | cut -d/ -f1) && \
               docker pull $IMAGE && \
@@ -186,7 +173,6 @@ pipeline {
 
     stage('CD: Health Check') {
       when { anyOf { branch 'master'; branch 'main' } }
-      agent { any }
       steps {
         sh '''
           set -eux
